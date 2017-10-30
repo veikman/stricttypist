@@ -38,58 +38,89 @@ func train(filepath string) error {
 	data, err := ioutil.ReadFile(filepath)
 	if err != nil { return err }
 
-	reader := bufio.NewReader(os.Stdin)
+	// Set up channels listening to STDIN in the background.
+	// These will persist even as STDIN is reconfigured throughout the program.
+	inputCh := make(chan rune)
+	errCh := make(chan error)
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		// TODO: handle interruption more safely.
+		for {
+			i, _, e := reader.ReadRune()
+			if i == 3 { errCh <- errors.New("Ctrl+c") }
+			if i == 27 { errCh <- errors.New("ESC") }
+			if e != nil { errCh <- e }
+			inputCh <- i
+		}
+	}()
+
 	randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
 	lines := strings.Split(string(data), "\n")
 	n := len(lines)
 	if n == 0 { return errors.New("No words in file.") }
 
 	fmt.Printf("Picking randomly from %d words.\n", n)
-	fmt.Println("Copy each word, or use Ctrl+C or ESC to quit.")
+	fmt.Println("Copy each word, or use Ctrl+c or ESC to quit.")
 	fmt.Println("—————————————————————————————————————————————")
 	for {
-		err := haveUserCopyWord(reader, lines[randomizer.Intn(n)])
+		err := haveUserCopyWord(inputCh, errCh, lines[randomizer.Intn(n)])
 		if err != nil { return err }
 	}
 	return nil
 }
 
-func haveUserCopyWord(reader *bufio.Reader, word string) error {
+func haveUserCopyWord(inputCh chan rune, errCh chan error, word string) error {
 	fmt.Println(word)
+
+	undoRaw, err := makeInputRaw()
+	if err != nil { return err }
+
+	loop:
 	for _, character := range word {
-		input, err := readRune(reader)
-		if err != nil { return err }
+		select {
+		case input := <-inputCh:
+			if input == character {
+				fmt.Print(color.GreenString("▀"))
+			} else {
+				// User hit the wrong key. Show the error and wind down.
+				fmt.Printf("%s %s %s",
+					color.New(color.Bold).Sprint(string(input)),
+					color.New(color.Bold, color.FgHiRed).Sprint("≠"),
+					color.New(color.Bold).Sprint(string(character)))
 
-		if input == character {
-			fmt.Print(color.GreenString("▀"))
-		} else {
-			fmt.Printf("%s not %s!\n",
-				color.New(color.Bold, color.FgWhite).Sprint(string(input)),
-				color.New(color.Bold, color.FgWhite).Sprint(string(character)))
-
-			continuation := time.Now().Add(time.Second)
-			for time.Now().Before(continuation) {
-				_, err = readRune(reader)
-				if err != nil { return err }
+				err = discardFurtherKeystrokes(inputCh, errCh)
+				break loop
 			}
-			return err
+		case err = <-errCh:
+			break loop
 		}
 	}
+
+	undoRaw()
 	fmt.Println()
-	return nil
+	return err
 }
 
-func readRune(reader *bufio.Reader) (rune, error) {
+func makeInputRaw() (func(), error) {
 	oldSettings, err := raw.MakeRaw(os.Stdin.Fd())
-	if err != nil { return 0, err }
-	defer raw.TcSetAttr(os.Stdin.Fd(), oldSettings)
-	input, _, err := reader.ReadRune()
+	return func() { raw.TcSetAttr(os.Stdin.Fd(), oldSettings) }, err
+}
 
-	// TODO: handle interruption more safely.
-	if input == 3 { return 0, errors.New("Ctrl+C") }
-	if input == 27 { return 0, errors.New("ESC") }
+func discardFurtherKeystrokes(inputCh chan rune, errCh chan error) error {
+	timeout := time.After(1 * time.Second)
 
-	return input, err
+	loop:
+	for {
+		select {
+		case <-inputCh:
+		case err := <-errCh:
+			return err
+		case <-timeout:
+			break loop
+		}
+	}
+
+	return nil
 }
 
 func main() {
