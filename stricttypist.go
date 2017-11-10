@@ -28,15 +28,14 @@ import (
 	"strings"
 	"time"
 
-    "github.com/creack/termios/raw"
+	"github.com/creack/termios/raw"
 	"github.com/fatih/color"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
-func train(filepath string) error {
-	data, err := ioutil.ReadFile(filepath)
-	if err != nil { return err }
+func train(lines *[]string) error {
+	// Go over all the lines from the master file.
 
 	// Set up channels listening to STDIN in the background.
 	// These will persist even as STDIN is reconfigured throughout the program.
@@ -54,29 +53,24 @@ func train(filepath string) error {
 		}
 	}()
 
-	randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
-	lines := strings.Split(string(data), "\n")
-	n := len(lines)
-	if n == 0 { return errors.New("No words in file.") }
-
-	fmt.Printf("Picking randomly from %d words.\n", n)
-	fmt.Println("Copy each word, or use Ctrl+c or ESC to quit.")
-	fmt.Println("—————————————————————————————————————————————")
-	for {
-		err := haveUserCopyWord(inputCh, errCh, lines[randomizer.Intn(n)])
+	fmt.Println("Copy each line or use Ctrl+c or ESC to quit.")
+	fmt.Println("————————————————————————————————————————————")
+	for _, line := range *lines {
+		err := haveUserCopyWord(inputCh, errCh, line)
 		if err != nil { return err }
 	}
 	return nil
 }
 
-func haveUserCopyWord(inputCh chan rune, errCh chan error, word string) error {
-	fmt.Println(word)
+func haveUserCopyWord(inputCh chan rune, errCh chan error, line string) error {
+	// Monitor the copying of a single line.
+	fmt.Println(line)
 
 	undoRaw, err := makeInputRaw()
 	if err != nil { return err }
 
 	loop:
-	for _, character := range word {
+	for _, character := range line {
 		select {
 		case input := <-inputCh:
 			if input == character {
@@ -108,23 +102,20 @@ func makeInputRaw() (func(), error) {
 
 func discardFurtherKeystrokes(inputCh chan rune, errCh chan error) error {
 	timeout := time.After(1 * time.Second)
-
-	loop:
 	for {
 		select {
 		case <-inputCh:
 		case err := <-errCh:
 			return err
 		case <-timeout:
-			break loop
+			return nil
 		}
 	}
-
-	return nil
 }
 
 func main() {
 	help := flag.Bool("h", false, "print this help message")
+	inOrder := flag.Bool("o", false, "process file in order; no shuffling")
 	file := flag.String("f", "/etc/dictionaries-common/words",
 		"source of words or phrases etc. to type; one per line")
 	flag.Parse()
@@ -136,7 +127,29 @@ func main() {
 		return
 	}
 
-	err := train(*file)
+	// Get requested master text.
+	data, err := ioutil.ReadFile(*file)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		fmt.Println("No lines in file.")
+		os.Exit(1)
+	}
+
+	if ! *inOrder {
+		// Shuffle. Fisher-Yates.
+		randomizer := rand.New(rand.NewSource(time.Now().UnixNano()))
+		for i := range lines {
+		    j := randomizer.Intn(i + 1)
+		    lines[i], lines[j] = lines[j], lines[i]
+		}
+	}
+
+	err = train(&lines)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
