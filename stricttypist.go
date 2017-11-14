@@ -32,9 +32,23 @@ import (
 	"github.com/fatih/color"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
-func train(lines *[]string) error {
+
+type keyboardSlip struct {
+	Correct rune
+	Incorrect rune
+}
+
+func (e keyboardSlip) Error() string {
+    return fmt.Sprintf("%s %s %s",
+		color.New(color.Bold).Sprint(string(e.Incorrect)),
+		color.New(color.Bold, color.FgHiRed).Sprint("≠"),
+		color.New(color.Bold).Sprint(string(e.Correct)))
+}
+
+
+func train(lines *[]string, untilCorrect *bool) error {
 	// Go over all the lines from the master file.
 
 	// Set up channels listening to STDIN in the background.
@@ -55,9 +69,23 @@ func train(lines *[]string) error {
 
 	fmt.Println("Copy each line or use Ctrl+c or ESC to quit.")
 	fmt.Println("————————————————————————————————————————————")
+
 	for _, line := range *lines {
-		err := haveUserCopyWord(inputCh, errCh, line)
-		if err != nil { return err }
+		for {
+			err := haveUserCopyWord(inputCh, errCh, line)
+
+			// Type-assert to see whether it was a keyboard slip.
+			_, slipped := err.(keyboardSlip)
+			if slipped {
+				if *untilCorrect { continue } else { break }
+			}
+
+			// If error was not a keyboard slip, terminate training.
+			if err != nil { return err }
+
+			// No error. Move on to the next line.
+			break
+		}
 	}
 	return nil
 }
@@ -76,13 +104,14 @@ func haveUserCopyWord(inputCh chan rune, errCh chan error, line string) error {
 			if input == character {
 				fmt.Print(color.GreenString("▀"))
 			} else {
-				// User hit the wrong key. Show the error and wind down.
-				fmt.Printf("%s %s %s",
-					color.New(color.Bold).Sprint(string(input)),
-					color.New(color.Bold, color.FgHiRed).Sprint("≠"),
-					color.New(color.Bold).Sprint(string(character)))
+				// User hit the wrong key.
+				slip := keyboardSlip{character, input}
+				fmt.Print(slip)
 
+				// Wind down. Override slip with a proper error if any.
 				err = discardFurtherKeystrokes(inputCh, errCh)
+				if err == nil { err = slip }
+
 				break loop
 			}
 		case err = <-errCh:
@@ -115,9 +144,11 @@ func discardFurtherKeystrokes(inputCh chan rune, errCh chan error) error {
 
 func main() {
 	help := flag.Bool("h", false, "print this help message")
-	inOrder := flag.Bool("o", false, "process file in order; no shuffling")
 	file := flag.String("f", "/etc/dictionaries-common/words",
-		"source of words or phrases etc. to type; one per line")
+		"file source of lines to type")
+	inOrder := flag.Bool("i", false, "process file in order; no shuffling")
+	untilCorrect := flag.Bool("u", false,
+		"loop each line until typed accurately")
 	flag.Parse()
 
 	if *help {
@@ -149,7 +180,7 @@ func main() {
 		}
 	}
 
-	err = train(&lines)
+	err = train(&lines, untilCorrect)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
